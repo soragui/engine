@@ -286,8 +286,7 @@ hb_font_funcs_t* getHbFontFuncs(bool forColorBitmapFont) {
 
 static bool isColorBitmapFont(hb_font_t* font) {
   hb_face_t* face = hb_font_get_face(font);
-  HbBlob cbdt(hb_face_reference_table(face, HB_TAG('C', 'B', 'D', 'T')));
-  return cbdt.size() > 0;
+  return hb_ot_color_has_png(face);
 }
 
 static float HBFixedToFloat(hb_position_t v) {
@@ -591,7 +590,7 @@ void Layout::doLayout(const uint16_t* buf,
                       const FontStyle& style,
                       const MinikinPaint& paint,
                       const std::shared_ptr<FontCollection>& collection) {
-  std::lock_guard<std::recursive_mutex> _l(gMinikinLock);
+  std::scoped_lock _l(gMinikinLock);
 
   LayoutContext ctx;
   ctx.style = style;
@@ -615,7 +614,7 @@ float Layout::measureText(const uint16_t* buf,
                           const MinikinPaint& paint,
                           const std::shared_ptr<FontCollection>& collection,
                           float* advances) {
-  std::lock_guard<std::recursive_mutex> _l(gMinikinLock);
+  std::scoped_lock _l(gMinikinLock);
 
   LayoutContext ctx;
   ctx.style = style;
@@ -1196,7 +1195,7 @@ void Layout::getBounds(MinikinRect* bounds) const {
 }
 
 void Layout::purgeCaches() {
-  std::lock_guard<std::recursive_mutex> _l(gMinikinLock);
+  std::scoped_lock _l(gMinikinLock);
   LayoutCache& layoutCache = LayoutEngine::getInstance().layoutCache;
   layoutCache.clear();
   purgeHbFontCacheLocked();

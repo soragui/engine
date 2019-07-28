@@ -10,22 +10,24 @@
 
 #include "flutter/fml/message_loop.h"
 #include "flutter/fml/platform/darwin/platform_version.h"
+#include "flutter/fml/trace_event.h"
 #include "flutter/shell/common/engine.h"
 #include "flutter/shell/common/platform_view.h"
 #include "flutter/shell/common/shell.h"
 #include "flutter/shell/common/switches.h"
 #include "flutter/shell/common/thread_host.h"
 #include "flutter/shell/platform/darwin/common/command_line.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject_Internal.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterObservatoryPublisher.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterPlatformPlugin.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterTextInputDelegate.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterViewController_Internal.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/platform_message_response_darwin.h"
-#include "flutter/shell/platform/darwin/ios/ios_surface.h"
-#include "flutter/shell/platform/darwin/ios/platform_view_ios.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/FlutterBinaryMessengerRelay.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject_Internal.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/FlutterObservatoryPublisher.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/FlutterPlatformPlugin.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/FlutterTextInputDelegate.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/FlutterViewController_Internal.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/platform_message_response_darwin.h"
+#import "flutter/shell/platform/darwin/ios/ios_surface.h"
+#import "flutter/shell/platform/darwin/ios/platform_view_ios.h"
 
-@interface FlutterEngine () <FlutterTextInputDelegate>
+@interface FlutterEngine () <FlutterTextInputDelegate, FlutterBinaryMessenger>
 // Maintains a dictionary of plugin names that have registered with the engine.  Used by
 // FlutterEngineRegistrar to implement a FlutterPluginRegistrar.
 @property(nonatomic, readonly) NSMutableDictionary* pluginPublications;
@@ -37,15 +39,15 @@
 
 @implementation FlutterEngine {
   fml::scoped_nsobject<FlutterDartProject> _dartProject;
-  shell::ThreadHost _threadHost;
-  std::unique_ptr<shell::Shell> _shell;
+  flutter::ThreadHost _threadHost;
+  std::unique_ptr<flutter::Shell> _shell;
   NSString* _labelPrefix;
   std::unique_ptr<fml::WeakPtrFactory<FlutterEngine>> _weakFactory;
 
   fml::WeakPtr<FlutterViewController> _viewController;
   fml::scoped_nsobject<FlutterObservatoryPublisher> _publisher;
 
-  std::unique_ptr<shell::FlutterPlatformViewsController> _platformViewsController;
+  std::unique_ptr<flutter::FlutterPlatformViewsController> _platformViewsController;
 
   // Channels
   fml::scoped_nsobject<FlutterPlatformPlugin> _platformPlugin;
@@ -61,7 +63,10 @@
 
   int64_t _nextTextureId;
 
+  uint64_t _nextPointerFlowId;
+
   BOOL _allowHeadlessExecution;
+  FlutterBinaryMessengerRelay* _binaryMessenger;
 }
 
 - (instancetype)initWithName:(NSString*)labelPrefix project:(FlutterDartProject*)projectOrNil {
@@ -86,19 +91,32 @@
     _dartProject.reset([projectOrNil retain]);
 
   _pluginPublications = [NSMutableDictionary new];
-  _platformViewsController.reset(new shell::FlutterPlatformViewsController());
+  _platformViewsController.reset(new flutter::FlutterPlatformViewsController());
 
   [self setupChannels];
+  _binaryMessenger = [[FlutterBinaryMessengerRelay alloc] initWithParent:self];
+
+  NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+  [center addObserver:self
+             selector:@selector(onMemoryWarning:)
+                 name:UIApplicationDidReceiveMemoryWarningNotification
+               object:nil];
 
   return self;
 }
 
 - (void)dealloc {
   [_pluginPublications release];
+  _binaryMessenger.parent = nil;
+  [_binaryMessenger release];
+
+  NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+  [center removeObserver:self name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
+
   [super dealloc];
 }
 
-- (shell::Shell&)shell {
+- (flutter::Shell&)shell {
   FML_DCHECK(_shell);
   return *_shell;
 }
@@ -107,7 +125,7 @@
   return _weakFactory->GetWeakPtr();
 }
 
-- (void)updateViewportMetrics:(blink::ViewportMetrics)viewportMetrics {
+- (void)updateViewportMetrics:(flutter::ViewportMetrics)viewportMetrics {
   self.shell.GetTaskRunners().GetUITaskRunner()->PostTask(
       [engine = self.shell.GetEngine(), metrics = viewportMetrics]() {
         if (engine) {
@@ -116,28 +134,35 @@
       });
 }
 
-- (void)dispatchPointerDataPacket:(std::unique_ptr<blink::PointerDataPacket>)packet {
-  self.shell.GetTaskRunners().GetUITaskRunner()->PostTask(
-      fml::MakeCopyable([engine = self.shell.GetEngine(), packet = std::move(packet)] {
+- (void)dispatchPointerDataPacket:(std::unique_ptr<flutter::PointerDataPacket>)packet {
+  TRACE_EVENT0("flutter", "dispatchPointerDataPacket");
+  TRACE_FLOW_BEGIN("flutter", "PointerEvent", _nextPointerFlowId);
+  self.shell.GetTaskRunners().GetUITaskRunner()->PostTask(fml::MakeCopyable(
+      [engine = self.shell.GetEngine(), packet = std::move(packet), flow_id = _nextPointerFlowId] {
         if (engine) {
-          engine->DispatchPointerDataPacket(*packet);
+          engine->DispatchPointerDataPacket(*packet, flow_id);
         }
       }));
+  _nextPointerFlowId++;
 }
 
-- (fml::WeakPtr<shell::PlatformView>)platformView {
+- (fml::WeakPtr<flutter::PlatformView>)platformView {
   FML_DCHECK(_shell);
   return _shell->GetPlatformView();
 }
 
-- (shell::PlatformViewIOS*)iosPlatformView {
+- (flutter::PlatformViewIOS*)iosPlatformView {
   FML_DCHECK(_shell);
-  return static_cast<shell::PlatformViewIOS*>(_shell->GetPlatformView().get());
+  return static_cast<flutter::PlatformViewIOS*>(_shell->GetPlatformView().get());
 }
 
 - (fml::RefPtr<fml::TaskRunner>)platformTaskRunner {
   FML_DCHECK(_shell);
   return _shell->GetTaskRunners().GetPlatformTaskRunner();
+}
+
+- (void)ensureSemanticsEnabled {
+  self.iosPlatformView->SetSemanticsEnabled(true);
 }
 
 - (void)setViewController:(FlutterViewController*)viewController {
@@ -149,11 +174,14 @@
 
 - (void)notifyViewControllerDeallocated {
   if (!_allowHeadlessExecution) {
-    [self resetChannels];
-
-    _shell.reset();
-    _threadHost.Reset();
+    [self destroyContext];
   }
+}
+
+- (void)destroyContext {
+  [self resetChannels];
+  _shell.reset();
+  _threadHost.Reset();
 }
 
 - (FlutterViewController*)viewController {
@@ -166,7 +194,7 @@
 - (FlutterPlatformPlugin*)platformPlugin {
   return _platformPlugin.get();
 }
-- (shell::FlutterPlatformViewsController*)platformViewsController {
+- (flutter::FlutterPlatformViewsController*)platformViewsController {
   return _platformViewsController.get();
 }
 - (FlutterTextInputPlugin*)textInputPlugin {
@@ -194,6 +222,10 @@
   return _settingsChannel.get();
 }
 
+- (NSURL*)observatoryUrl {
+  return [_publisher.get() url];
+}
+
 - (void)resetChannels {
   _localizationChannel.reset();
   _navigationChannel.reset();
@@ -211,42 +243,42 @@
 - (void)setupChannels {
   _localizationChannel.reset([[FlutterMethodChannel alloc]
          initWithName:@"flutter/localization"
-      binaryMessenger:self
+      binaryMessenger:self.binaryMessenger
                 codec:[FlutterJSONMethodCodec sharedInstance]]);
 
   _navigationChannel.reset([[FlutterMethodChannel alloc]
          initWithName:@"flutter/navigation"
-      binaryMessenger:self
+      binaryMessenger:self.binaryMessenger
                 codec:[FlutterJSONMethodCodec sharedInstance]]);
 
   _platformChannel.reset([[FlutterMethodChannel alloc]
          initWithName:@"flutter/platform"
-      binaryMessenger:self
+      binaryMessenger:self.binaryMessenger
                 codec:[FlutterJSONMethodCodec sharedInstance]]);
 
   _platformViewsChannel.reset([[FlutterMethodChannel alloc]
          initWithName:@"flutter/platform_views"
-      binaryMessenger:self
+      binaryMessenger:self.binaryMessenger
                 codec:[FlutterStandardMethodCodec sharedInstance]]);
 
   _textInputChannel.reset([[FlutterMethodChannel alloc]
          initWithName:@"flutter/textinput"
-      binaryMessenger:self
+      binaryMessenger:self.binaryMessenger
                 codec:[FlutterJSONMethodCodec sharedInstance]]);
 
   _lifecycleChannel.reset([[FlutterBasicMessageChannel alloc]
          initWithName:@"flutter/lifecycle"
-      binaryMessenger:self
+      binaryMessenger:self.binaryMessenger
                 codec:[FlutterStringCodec sharedInstance]]);
 
   _systemChannel.reset([[FlutterBasicMessageChannel alloc]
          initWithName:@"flutter/system"
-      binaryMessenger:self
+      binaryMessenger:self.binaryMessenger
                 codec:[FlutterJSONMessageCodec sharedInstance]]);
 
   _settingsChannel.reset([[FlutterBasicMessageChannel alloc]
          initWithName:@"flutter/settings"
-      binaryMessenger:self
+      binaryMessenger:self.binaryMessenger
                 codec:[FlutterJSONMessageCodec sharedInstance]]);
 
   _textInputPlugin.reset([[FlutterTextInputPlugin alloc] init]);
@@ -273,8 +305,8 @@
   }
 }
 
-- (shell::Rasterizer::Screenshot)screenshot:(shell::Rasterizer::ScreenshotType)type
-                               base64Encode:(bool)base64Encode {
+- (flutter::Rasterizer::Screenshot)screenshot:(flutter::Rasterizer::ScreenshotType)type
+                                 base64Encode:(bool)base64Encode {
   return self.shell.Screenshot(type, base64Encode);
 }
 
@@ -287,7 +319,7 @@
   ]() mutable {
         if (engine) {
           auto result = engine->Run(std::move(config));
-          if (result == shell::Engine::RunStatus::Failure) {
+          if (result == flutter::Engine::RunStatus::Failure) {
             FML_LOG(ERROR) << "Could not launch engine with configuration.";
           }
         }
@@ -322,55 +354,56 @@
   // initialized.
   fml::MessageLoop::EnsureInitializedForCurrentThread();
 
-  _threadHost = {
-      threadLabel.UTF8String,  // label
-      shell::ThreadHost::Type::UI | shell::ThreadHost::Type::GPU | shell::ThreadHost::Type::IO};
+  _threadHost = {threadLabel.UTF8String,  // label
+                 flutter::ThreadHost::Type::UI | flutter::ThreadHost::Type::GPU |
+                     flutter::ThreadHost::Type::IO};
 
   // Lambda captures by pointers to ObjC objects are fine here because the
   // create call is
   // synchronous.
-  shell::Shell::CreateCallback<shell::PlatformView> on_create_platform_view =
-      [](shell::Shell& shell) {
-        return std::make_unique<shell::PlatformViewIOS>(shell, shell.GetTaskRunners());
+  flutter::Shell::CreateCallback<flutter::PlatformView> on_create_platform_view =
+      [](flutter::Shell& shell) {
+        return std::make_unique<flutter::PlatformViewIOS>(shell, shell.GetTaskRunners());
       };
 
-  shell::Shell::CreateCallback<shell::Rasterizer> on_create_rasterizer = [](shell::Shell& shell) {
-    return std::make_unique<shell::Rasterizer>(shell.GetTaskRunners());
-  };
+  flutter::Shell::CreateCallback<flutter::Rasterizer> on_create_rasterizer =
+      [](flutter::Shell& shell) {
+        return std::make_unique<flutter::Rasterizer>(shell, shell.GetTaskRunners());
+      };
 
-  if (shell::IsIosEmbeddedViewsPreviewEnabled()) {
+  if (flutter::IsIosEmbeddedViewsPreviewEnabled()) {
     // Embedded views requires the gpu and the platform views to be the same.
     // The plan is to eventually dynamically merge the threads when there's a
     // platform view in the layer tree.
-    // For now we run in a single threaded configuration.
-    // TODO(amirh/chinmaygarde): merge only the gpu and platform threads.
-    // https://github.com/flutter/flutter/issues/23974
+    // For now we use a fixed thread configuration with the same thread used as the
+    // gpu and platform task runner.
     // TODO(amirh/chinmaygarde): remove this, and dynamically change the thread configuration.
     // https://github.com/flutter/flutter/issues/23975
-    blink::TaskRunners task_runners(threadLabel.UTF8String,                          // label
-                                    fml::MessageLoop::GetCurrent().GetTaskRunner(),  // platform
-                                    fml::MessageLoop::GetCurrent().GetTaskRunner(),  // gpu
-                                    fml::MessageLoop::GetCurrent().GetTaskRunner(),  // ui
-                                    fml::MessageLoop::GetCurrent().GetTaskRunner()   // io
+
+    flutter::TaskRunners task_runners(threadLabel.UTF8String,                          // label
+                                      fml::MessageLoop::GetCurrent().GetTaskRunner(),  // platform
+                                      fml::MessageLoop::GetCurrent().GetTaskRunner(),  // gpu
+                                      _threadHost.ui_thread->GetTaskRunner(),          // ui
+                                      _threadHost.io_thread->GetTaskRunner()           // io
     );
     // Create the shell. This is a blocking operation.
-    _shell = shell::Shell::Create(std::move(task_runners),  // task runners
-                                  std::move(settings),      // settings
-                                  on_create_platform_view,  // platform view creation
-                                  on_create_rasterizer      // rasterzier creation
+    _shell = flutter::Shell::Create(std::move(task_runners),  // task runners
+                                    std::move(settings),      // settings
+                                    on_create_platform_view,  // platform view creation
+                                    on_create_rasterizer      // rasterzier creation
     );
   } else {
-    blink::TaskRunners task_runners(threadLabel.UTF8String,                          // label
-                                    fml::MessageLoop::GetCurrent().GetTaskRunner(),  // platform
-                                    _threadHost.gpu_thread->GetTaskRunner(),         // gpu
-                                    _threadHost.ui_thread->GetTaskRunner(),          // ui
-                                    _threadHost.io_thread->GetTaskRunner()           // io
+    flutter::TaskRunners task_runners(threadLabel.UTF8String,                          // label
+                                      fml::MessageLoop::GetCurrent().GetTaskRunner(),  // platform
+                                      _threadHost.gpu_thread->GetTaskRunner(),         // gpu
+                                      _threadHost.ui_thread->GetTaskRunner(),          // ui
+                                      _threadHost.io_thread->GetTaskRunner()           // io
     );
     // Create the shell. This is a blocking operation.
-    _shell = shell::Shell::Create(std::move(task_runners),  // task runners
-                                  std::move(settings),      // settings
-                                  on_create_platform_view,  // platform view creation
-                                  on_create_rasterizer      // rasterzier creation
+    _shell = flutter::Shell::Create(std::move(task_runners),  // task runners
+                                    std::move(settings),      // settings
+                                    on_create_platform_view,  // platform view creation
+                                    on_create_rasterizer      // rasterzier creation
     );
   }
 
@@ -380,7 +413,7 @@
   } else {
     [self setupChannels];
     if (!_platformViewsController) {
-      _platformViewsController.reset(new shell::FlutterPlatformViewsController());
+      _platformViewsController.reset(new flutter::FlutterPlatformViewsController());
     }
     _publisher.reset([[FlutterObservatoryPublisher alloc] init]);
     [self maybeSetupPlatformViewChannels];
@@ -474,10 +507,14 @@
 
 #pragma mark - Screenshot Delegate
 
-- (shell::Rasterizer::Screenshot)takeScreenshot:(shell::Rasterizer::ScreenshotType)type
-                                asBase64Encoded:(BOOL)base64Encode {
+- (flutter::Rasterizer::Screenshot)takeScreenshot:(flutter::Rasterizer::ScreenshotType)type
+                                  asBase64Encoded:(BOOL)base64Encode {
   FML_DCHECK(_shell) << "Cannot takeScreenshot without a shell";
   return _shell->Screenshot(type, base64Encode);
+}
+
+- (NSObject<FlutterBinaryMessenger>*)binaryMessenger {
+  return _binaryMessenger;
 }
 
 #pragma mark - FlutterBinaryMessenger
@@ -490,17 +527,17 @@
               message:(NSData*)message
           binaryReply:(FlutterBinaryReply)callback {
   NSAssert(channel, @"The channel must not be null");
-  fml::RefPtr<shell::PlatformMessageResponseDarwin> response =
+  fml::RefPtr<flutter::PlatformMessageResponseDarwin> response =
       (callback == nil) ? nullptr
-                        : fml::MakeRefCounted<shell::PlatformMessageResponseDarwin>(
+                        : fml::MakeRefCounted<flutter::PlatformMessageResponseDarwin>(
                               ^(NSData* reply) {
                                 callback(reply);
                               },
                               _shell->GetTaskRunners().GetPlatformTaskRunner());
-  fml::RefPtr<blink::PlatformMessage> platformMessage =
-      (message == nil) ? fml::MakeRefCounted<blink::PlatformMessage>(channel.UTF8String, response)
-                       : fml::MakeRefCounted<blink::PlatformMessage>(
-                             channel.UTF8String, shell::GetVectorFromNSData(message), response);
+  fml::RefPtr<flutter::PlatformMessage> platformMessage =
+      (message == nil) ? fml::MakeRefCounted<flutter::PlatformMessage>(channel.UTF8String, response)
+                       : fml::MakeRefCounted<flutter::PlatformMessage>(
+                             channel.UTF8String, flutter::GetVectorFromNSData(message), response);
 
   _shell->GetPlatformView()->DispatchPlatformMessage(platformMessage);
 }
@@ -545,7 +582,7 @@
 - (NSObject<FlutterPluginRegistrar>*)registrarForPlugin:(NSString*)pluginKey {
   NSAssert(self.pluginPublications[pluginKey] == nil, @"Duplicate plugin key: %@", pluginKey);
   self.pluginPublications[pluginKey] = [NSNull null];
-  return [[FlutterEngineRegistrar alloc] initWithPlugin:pluginKey flutterEngine:self];
+  return [[[FlutterEngineRegistrar alloc] initWithPlugin:pluginKey flutterEngine:self] autorelease];
 }
 
 - (BOOL)hasPlugin:(NSString*)pluginKey {
@@ -554,6 +591,15 @@
 
 - (NSObject*)valuePublishedByPlugin:(NSString*)pluginKey {
   return _pluginPublications[pluginKey];
+}
+
+#pragma mark - Memory Notifications
+
+- (void)onMemoryWarning:(NSNotification*)notification {
+  if (_shell) {
+    _shell->NotifyLowMemoryWarning();
+  }
+  [_systemChannel sendMessage:@{@"type" : @"memoryPressure"}];
 }
 
 @end
@@ -578,7 +624,7 @@
 }
 
 - (NSObject<FlutterBinaryMessenger>*)messenger {
-  return _flutterEngine;
+  return _flutterEngine.binaryMessenger;
 }
 
 - (NSObject<FlutterTextureRegistry>*)textures {
