@@ -56,6 +56,11 @@ void AfterTask(async_loop_t*, void*) {
 }
 
 constexpr async_loop_config_t kLoopConfig = {
+    .default_accessors =
+        {
+            .getter = async_get_default_dispatcher,
+            .setter = async_set_default_dispatcher,
+        },
     .make_default_for_current_thread = true,
     .epilogue = &AfterTask,
 };
@@ -157,7 +162,7 @@ bool DartComponentController::SetupNamespace() {
     return false;
   }
 
-  dart_utils::SetupComponentTemp(namespace_);
+  dart_utils::RunnerTemp::SetupComponent(namespace_);
 
   for (size_t i = 0; i < flat->paths.size(); ++i) {
     if (flat->paths.at(i) == kTmpPath) {
@@ -309,9 +314,7 @@ bool DartComponentController::CreateIsolate(
 
   isolate_ = Dart_CreateIsolateGroup(
       url_.c_str(), label_.c_str(), isolate_snapshot_data,
-      isolate_snapshot_instructions, nullptr /* shared_snapshot_data */,
-      nullptr /* shared_snapshot_instructions */, nullptr /* flags */, state,
-      state, &error);
+      isolate_snapshot_instructions, nullptr /* flags */, state, state, &error);
   if (!isolate_) {
     FX_LOGF(ERROR, LOG_TAG, "Dart_CreateIsolateGroup failed: %s", error);
     return false;
@@ -346,8 +349,8 @@ bool DartComponentController::Main() {
 
   tonic::DartMicrotaskQueue::StartForCurrentThread();
 
-  std::vector<std::string> arguments = std::move(
-      startup_info_.launch_info.arguments.value_or(std::vector<std::string>()));
+  std::vector<std::string> arguments =
+      startup_info_.launch_info.arguments.value_or(std::vector<std::string>());
 
   stdoutfd_ = SetupFileDescriptor(std::move(startup_info_.launch_info.out));
   stderrfd_ = SetupFileDescriptor(std::move(startup_info_.launch_info.err));

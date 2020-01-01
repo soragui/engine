@@ -36,19 +36,32 @@ struct SwitchDesc {
 #define DEF_SWITCHES_END };
 // clang-format on
 
-#if FLUTTER_RUNTIME_MODE != FLUTTER_RUNTIME_MODE_RELEASE
-
 // List of common and safe VM flags to allow to be passed directly to the VM.
+#if FLUTTER_RELEASE
+
+// clang-format off
+static const std::string gDartFlagsWhitelist[] = {
+    "--no-causal_async_stacks",
+};
+// clang-format on
+
+#else
+
 // clang-format off
 static const std::string gDartFlagsWhitelist[] = {
     "--max_profile_depth",
     "--profile_period",
     "--random_seed",
     "--enable_mirrors",
+    "--write-service-info",
+    "--sample-buffer-duration",
+    "--no-causal_async_stacks",
+    "--trace-reload",
+    "--trace-reload-verbose",
 };
 // clang-format on
 
-#endif
+#endif  // FLUTTER_RELEASE
 
 // Include again for struct definition.
 #include "flutter/shell/common/switches.h"
@@ -132,8 +145,6 @@ const std::string_view FlagForSwitch(Switch swtch) {
   return std::string_view();
 }
 
-#if FLUTTER_RUNTIME_MODE != FLUTTER_RUNTIME_MODE_RELEASE
-
 static bool IsWhitelistedDartVMFlag(const std::string& flag) {
   for (uint32_t i = 0; i < fml::size(gDartFlagsWhitelist); ++i) {
     const std::string& allowed = gDartFlagsWhitelist[i];
@@ -146,8 +157,6 @@ static bool IsWhitelistedDartVMFlag(const std::string& flag) {
   }
   return false;
 }
-
-#endif
 
 template <typename T>
 static bool GetSwitchValue(const fml::CommandLine& command_line,
@@ -252,6 +261,12 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
   settings.trace_startup =
       command_line.HasOption(FlagForSwitch(Switch::TraceStartup));
 
+  settings.trace_skia =
+      command_line.HasOption(FlagForSwitch(Switch::TraceSkia));
+
+  settings.trace_systrace =
+      command_line.HasOption(FlagForSwitch(Switch::TraceSystrace));
+
   settings.skia_deterministic_rendering_on_cpu =
       command_line.HasOption(FlagForSwitch(Switch::SkiaDeterministicRendering));
 
@@ -326,8 +341,6 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
   settings.use_test_fonts =
       command_line.HasOption(FlagForSwitch(Switch::UseTestFonts));
 
-#if FLUTTER_RUNTIME_MODE != FLUTTER_RUNTIME_MODE_RELEASE
-  command_line.GetOptionValue(FlagForSwitch(Switch::LogTag), &settings.log_tag);
   std::string all_dart_flags;
   if (command_line.GetOptionValue(FlagForSwitch(Switch::DartFlags),
                                   &all_dart_flags)) {
@@ -343,14 +356,15 @@ Settings SettingsFromCommandLine(const fml::CommandLine& command_line) {
     }
   }
 
-  settings.trace_skia =
-      command_line.HasOption(FlagForSwitch(Switch::TraceSkia));
-  settings.trace_systrace =
-      command_line.HasOption(FlagForSwitch(Switch::TraceSystrace));
+#if !FLUTTER_RELEASE
+  command_line.GetOptionValue(FlagForSwitch(Switch::LogTag), &settings.log_tag);
 #endif
 
   settings.dump_skp_on_shader_compilation =
       command_line.HasOption(FlagForSwitch(Switch::DumpSkpOnShaderCompilation));
+
+  settings.cache_sksl =
+      command_line.HasOption(FlagForSwitch(Switch::CacheSkSL));
 
   return settings;
 }

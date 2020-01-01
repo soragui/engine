@@ -111,18 +111,6 @@ void commitScene(PersistedScene scene) {
   }());
 }
 
-/// Discards information about previously rendered frames, including DOM
-/// elements and cached canvases.
-///
-/// After calling this function new canvases will be created for the
-/// subsequent scene. This is useful when tests need predictable canvas
-/// sizes. If the cache is not cleared, then canvases allocated in one test
-/// may be reused in another test.
-void debugForgetFrameScene() {
-  _clipIdCounter = 0;
-  _recycledCanvases.clear();
-}
-
 /// Surfaces that were retained this frame.
 ///
 /// Surfaces should be added to this list directly. Instead, if a surface needs
@@ -639,6 +627,14 @@ abstract class PersistedSurface implements ui.EngineLayer {
   @protected
   @mustCallSuper
   void build() {
+    if (rootElement != null) {
+      try {
+        throw null;
+      } catch(_, stack) {
+        print('Attempted to build a $runtimeType, but it already has an HTML element ${rootElement.tagName}.');
+        print(stack.toString().split('\n').take(20).join('\n'));
+      }
+    }
     assert(rootElement == null);
     assert(isCreated);
     rootElement = createElement();
@@ -808,7 +804,12 @@ abstract class PersistedSurface implements ui.EngineLayer {
   // Matrix only contains local transform (not chain multiplied since root).
   Matrix4 _localTransformInverse;
 
-  Matrix4 get localTransformInverse;
+  /// The inverse of the local transform that this surface applies to its children.
+  ///
+  /// The default implementation is identity transform. Concrete
+  /// implementations may override this getter to supply a different transform.
+  Matrix4 get localTransformInverse =>
+      _localTransformInverse ??= Matrix4.identity();
 
   /// Recomputes [transform] and [globalClip] fields.
   ///

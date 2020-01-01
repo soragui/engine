@@ -173,7 +173,8 @@ void main() {
       expect(picture.buildCount, 1);
       expect(picture.updateCount, 0);
       expect(picture.applyPaintCount, 2);
-    });
+    }, // TODO(nurhan): https://github.com/flutter/flutter/issues/46638
+        skip: (browserEngine == BrowserEngine.firefox));
   });
 }
 
@@ -185,7 +186,7 @@ void testLayerLifeCycle(
     TestLayerBuilder layerBuilder, ExpectedHtmlGetter expectedHtmlGetter) {
   // Force scene builder to start from scratch. This guarantees that the first
   // scene starts from the "build" phase.
-  SceneBuilder.debugForgetFrameScene();
+  SurfaceSceneBuilder.debugForgetFrameScene();
 
   // Build: builds a brand new layer.
   SceneBuilder sceneBuilder = SceneBuilder();
@@ -255,7 +256,7 @@ void testLayerLifeCycle(
 
 class MockPersistedPicture extends PersistedPicture {
   factory MockPersistedPicture() {
-    final PictureRecorder recorder = PictureRecorder();
+    final EnginePictureRecorder recorder = PictureRecorder();
     // Use the largest cull rect so that layer clips are effective. The tests
     // rely on this.
     recorder.beginRecording(Rect.largest)..drawPaint(Paint());
